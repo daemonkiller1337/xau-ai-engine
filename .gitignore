@@ -209,6 +209,13 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Raw market data exports (keep local and never commit)
+data/raw/*.csv
+
+# Generated research artifacts (keep local unless intentionally tracked)
+data/clean/*.parquet
+data/clean/*.json
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
