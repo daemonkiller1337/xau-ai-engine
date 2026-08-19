@@ -21,6 +21,7 @@ def test_configuration_loads_successfully() -> None:
     config = load_config(BASE_CONFIG, RESEARCH_CONFIG, HOLDOUT_CONFIG)
 
     assert config.project.symbol == "XAUUSD"
+    assert config.project.broker_timezone == "Europe/Athens"
 
 
 def test_invalid_tick_size_fails() -> None:
@@ -28,6 +29,7 @@ def test_invalid_tick_size_fails() -> None:
         ProjectConfig(
             symbol="XAUUSD",
             timezone="UTC",
+            broker_timezone="Europe/Athens",
             tick_size=0,
             price_unit="points",
         )
@@ -70,7 +72,15 @@ def test_holdout_defaults_to_protected() -> None:
 
 
 def test_lookahead_defaults_to_false() -> None:
-    assert ProjectConfig(symbol="XAUUSD", timezone="UTC", tick_size=0.01, price_unit="points").allow_lookahead is False
+    assert (
+        ProjectConfig(
+            symbol="XAUUSD",
+            timezone="UTC",
+            broker_timezone="Europe/Athens",
+            tick_size=0.01,
+            price_unit="points",
+        ).allow_lookahead is False
+    )
 
 
 def test_perfect_bias_is_rejected_when_lookahead_is_false() -> None:

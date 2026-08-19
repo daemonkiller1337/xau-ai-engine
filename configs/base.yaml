@@ -1,6 +1,9 @@
 project:
   symbol: XAUUSD
   timezone: UTC
+  # Assumption: XM MT5 server time matches the Europe/Athens DST rules (GMT+2 in winter, GMT+3 in summer).
+  # This is a modeling choice to reflect the documented broker server behavior, not a broker-issued IANA zone.
+  broker_timezone: Europe/Athens
   # Temporary placeholder until verified against the chosen data source.
   tick_size: 0.01
   price_unit: points

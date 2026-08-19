@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from xau_engine.data.ingest import detect_gaps, parse_xm_csv
+from xau_engine.data.ingest import convert_broker_time_to_utc, detect_gaps, parse_xm_csv
 from xau_engine.data.models import MarketBar
 
 
@@ -193,3 +193,37 @@ def test_timestamp_remains_naive(tmp_path: Path) -> None:
     )
     result = parse_xm_csv(csv_path)
     assert result.bars[0].timestamp.tzinfo is None
+
+
+def test_summer_offset_uses_dst_aware_broker_timezone() -> None:
+    raw = pd.Timestamp("2026-08-19 23:11:00")
+    utc_value = convert_broker_time_to_utc(raw, "Europe/Athens")
+    assert utc_value.isoformat() == "2026-08-19T20:11:00+00:00"
+
+
+def test_winter_offset_uses_standard_broker_timezone() -> None:
+    raw = pd.Timestamp("2025-01-15 12:00:00")
+    utc_value = convert_broker_time_to_utc(raw, "Europe/Athens")
+    assert utc_value.isoformat() == "2025-01-15T10:00:00+00:00"
+
+
+def test_dst_transition_is_handled_correctly() -> None:
+    before_spring = convert_broker_time_to_utc(pd.Timestamp("2025-03-30 01:59:00"), "Europe/Athens")
+    assert before_spring.isoformat() == "2025-03-29T23:59:00+00:00"
+    with pytest.raises(ValueError, match="nonexistent local broker timestamp"):
+        convert_broker_time_to_utc(pd.Timestamp("2025-03-30 03:00:00"), "Europe/Athens")
+
+
+def test_parse_xm_csv_preserves_raw_and_sets_utc_timestamp(tmp_path: Path) -> None:
+    csv_path = tmp_path / "utc.csv"
+    csv_path.write_text(
+        """<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>
+2026.08.19\t23:11:00\t2020.84\t2020.95\t2020.63\t2020.82\t27\t0\t5
+""",
+        encoding="utf-8",
+    )
+    result = parse_xm_csv(csv_path, broker_timezone="Europe/Athens")
+    assert result.bars[0].raw_broker_timestamp == result.bars[0].timestamp
+    assert result.bars[0].utc_timestamp is not None
+    assert result.bars[0].utc_timestamp.isoformat() == "2026-08-19T20:11:00+00:00"
+    assert result.broker_timezone == "Europe/Athens"

@@ -8,8 +8,10 @@ from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+from pytz.exceptions import NonExistentTimeError
 
 from .models import MarketBar, ValidationIssue, ValidationReport
 
@@ -115,6 +117,18 @@ def detect_gaps(timestamps: Iterable[datetime | pd.Timestamp]) -> dict[str, Any]
         "largest_gap_start": largest_gap_start.isoformat(),
         "largest_gap_end": largest_gap_end.isoformat(),
     }
+
+
+def convert_broker_time_to_utc(raw_timestamp: datetime | pd.Timestamp, broker_timezone: str) -> pd.Timestamp:
+    readable = pd.Timestamp(raw_timestamp)
+    tz = ZoneInfo(broker_timezone)
+    try:
+        localized = readable.tz_localize(tz)
+    except (TypeError, ValueError, NonExistentTimeError) as exc:
+        raise ValueError(
+            f"nonexistent local broker timestamp for timezone {broker_timezone}: {readable.isoformat()}"
+        ) from exc
+    return localized.tz_convert("UTC")
 
 
 def _summarize_numeric(values: list[int | float]) -> dict[str, float | int | None]:
@@ -246,11 +260,14 @@ def _load_xm_table(path: Path) -> pd.DataFrame:
     return frame.astype(str)
 
 
-def parse_xm_csv(path: str | Path) -> ValidationReport:
+def parse_xm_csv(path: str | Path, broker_timezone: str = "Europe/Athens") -> ValidationReport:
     csv_path = Path(path)
     raw_df = _load_xm_table(csv_path)
     if raw_df.empty:
-        return ValidationReport(row_count=0, unique_symbols=[CANONICAL_SYMBOL], missing_value_counts={})
+        report = ValidationReport(row_count=0, unique_symbols=[CANONICAL_SYMBOL], missing_value_counts={})
+        report.broker_timezone = broker_timezone
+        report.utc_conversion_applied = True
+        return report
 
     raw_df.columns = [_normalize_column(col) for col in raw_df.columns]
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in raw_df.columns]
@@ -261,6 +278,8 @@ def parse_xm_csv(path: str | Path) -> ValidationReport:
         row_count=len(raw_df),
         missing_value_counts={column.lower(): 0 for column in REQUIRED_COLUMNS},
         negative_value_counts={column.lower(): 0 for column in ["OPEN", "HIGH", "LOW", "CLOSE", "TICKVOL", "VOL", "SPREAD"]},
+        broker_timezone=broker_timezone,
+        utc_conversion_applied=True,
     )
 
     seen_timestamps: dict[datetime, int] = {}
@@ -300,6 +319,23 @@ def parse_xm_csv(path: str | Path) -> ValidationReport:
             continue
 
         timestamp = bar.timestamp
+        utc_timestamp = convert_broker_time_to_utc(timestamp, broker_timezone)
+        bar = MarketBar(
+            timestamp=timestamp,
+            symbol=bar.symbol,
+            broker_symbol=bar.broker_symbol,
+            raw_broker_timestamp=timestamp,
+            broker_timezone=broker_timezone,
+            utc_timestamp=utc_timestamp.to_pydatetime(),
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            tick_volume=bar.tick_volume,
+            real_volume=bar.real_volume,
+            spread=bar.spread,
+            source=bar.source,
+        )
         if timestamp in seen_timestamps:
             report.duplicate_count += 1
             report.issues.append(
@@ -326,16 +362,26 @@ def parse_xm_csv(path: str | Path) -> ValidationReport:
 
     report.bars = valid_bars
     if valid_bars:
-        report.first_timestamp = min(bar.timestamp for bar in valid_bars)
-        report.last_timestamp = max(bar.timestamp for bar in valid_bars)
+        report.first_timestamp = min(bar.raw_broker_timestamp or bar.timestamp for bar in valid_bars)
+        report.last_timestamp = max(bar.raw_broker_timestamp or bar.timestamp for bar in valid_bars)
+        report.utc_first_timestamp = min(bar.utc_timestamp for bar in valid_bars if bar.utc_timestamp is not None)
+        report.utc_last_timestamp = max(bar.utc_timestamp for bar in valid_bars if bar.utc_timestamp is not None)
         report.unique_symbols = sorted({bar.symbol for bar in valid_bars})
         report.spread_stats = _summarize_numeric([bar.spread for bar in valid_bars])
         report.tick_volume_stats = _summarize_numeric([bar.tick_volume for bar in valid_bars])
         report.zero_real_volume_count = sum(1 for bar in valid_bars if bar.real_volume == 0)
-        report.gap_stats = detect_gaps([bar.timestamp for bar in valid_bars])
+        report.gap_stats = detect_gaps([bar.raw_broker_timestamp or bar.timestamp for bar in valid_bars])
     else:
         report.unique_symbols = [CANONICAL_SYMBOL]
-        report.gap_stats = {"gap_count": 0, "total_gap_minutes": 0, "max_gap_minutes": 0, "mean_gap_minutes": 0.0, "min_gap_minutes": 0}
+        report.gap_stats = {
+            "interval_count": 0,
+            "normal_1m_intervals": 0,
+            "gap_count": 0,
+            "total_missing_minutes": 0,
+            "max_missing_minutes": 0,
+            "largest_gap_start": None,
+            "largest_gap_end": None,
+        }
 
     for bar in valid_bars:
         if bar.real_volume < 0:

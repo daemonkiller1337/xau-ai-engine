@@ -11,6 +11,7 @@ class ConfigModel(BaseModel):
 class ProjectConfig(ConfigModel):
     symbol: str
     timezone: str
+    broker_timezone: str = "Europe/Athens"
     tick_size: float = Field(gt=0)
     price_unit: str
     holdout_enabled: bool = False
