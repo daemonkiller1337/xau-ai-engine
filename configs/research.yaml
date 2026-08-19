@@ -1,0 +1,15 @@
+# Initial research defaults only. These are not proven Gold parameters.
+research:
+  atr_period: 14
+  fvg_timeframe: 5m
+  fvg_minimum_size_points: 10
+  fvg_minimum_atr_multiple: 0.5
+  sweep_k_bars: 5
+  sweep_penetration_ticks: 1
+  displacement_atr_multiple: 1.0
+  mss_enabled: false
+  bias_definition: structural
+  entry_model: placeholder
+  stop_model: placeholder
+  target_model: placeholder
+  max_trades_per_window: 1

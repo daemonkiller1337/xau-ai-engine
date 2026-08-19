@@ -1,0 +1,6 @@
+# Temporary cutoff placeholder. Replace after inspecting the actual dataset.
+holdout:
+  cutoff_date: "2099-01-01"
+  enabled: true
+  access_override: false
+  explicit_override_required: true

@@ -1,0 +1,38 @@
+project:
+  symbol: XAUUSD
+  timezone: UTC
+  # Temporary placeholder until verified against the chosen data source.
+  tick_size: 0.01
+  price_unit: points
+  holdout_enabled: false
+  allow_lookahead: false
+
+session:
+  timezone: UTC
+  london:
+    start: "08:00"
+    end: "12:00"
+  ny_am:
+    start: "13:30"
+    end: "16:00"
+  ny_pm:
+    start: "16:00"
+    end: "20:00"
+
+data:
+  timestamp_column: timestamp
+  open_column: open
+  high_column: high
+  low_column: low
+  close_column: close
+  volume_column: volume
+  bid_ask_available: false
+  default_data_path: data/clean
+
+execution:
+  spread_model: unverified_placeholder
+  slippage_ticks: 0
+  commission: null
+  # Temporary placeholder until verified against the chosen data source.
+  tick_size: 0.01
+  ambiguous_bar_rule: reject
