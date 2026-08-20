@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, time
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,15 +20,57 @@ class ProjectConfig(ConfigModel):
 
 
 class SessionWindow(ConfigModel):
+    name: str
     start: str
     end: str
+    timezone: str
+    enabled: bool = True
+
+    @field_validator("name", "timezone")
+    @classmethod
+    def require_nonempty_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("session window text fields must not be empty")
+        return value
+
+    @field_validator("start", "end")
+    @classmethod
+    def validate_time(cls, value: str) -> str:
+        try:
+            parsed = time.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError(f"invalid session time: {value!r}") from error
+        if parsed.tzinfo is not None:
+            raise ValueError("session times must not include a timezone")
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError(f"unknown session timezone: {value!r}") from error
+        return value
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "SessionWindow":
+        if self.start == self.end:
+            raise ValueError("session window start and end must differ")
+        return self
 
 
 class SessionConfig(ConfigModel):
-    london: SessionWindow
-    ny_am: SessionWindow
-    ny_pm: SessionWindow
-    timezone: str
+    windows: list[SessionWindow]
+    timezone: str = "UTC"
+
+    @model_validator(mode="after")
+    def validate_unique_names(self) -> "SessionConfig":
+        names = [window.name for window in self.windows]
+        if len(names) != len(set(names)):
+            raise ValueError("session window names must be unique")
+        return self
 
 
 class DataConfig(ConfigModel):
