@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from bisect import bisect_left, insort
+from bisect import bisect_left
 from collections.abc import Iterable
+from math import inf
 
 import pandas as pd
 
@@ -34,21 +35,26 @@ def _swing_groups(
     events = [event for event in swing_events if event.get("event_type") == event_type]
     events.sort(key=lambda event: pd.Timestamp(event["confirmation_timestamp"]))
     groups: list[list[dict[str, object]]] = []
+    group_by_tick: dict[int, list[int]] = {}
     tolerance = tolerance_ticks * tick_size
     for event in events:
         if event.get("causal") is False:
             raise ValueError("liquidity detection requires causal swing events")
         price = float(event["price"])
-        matching_group = next(
+        tick = round(price / tick_size)
+        matching_index = next(
             (
-                group
-                for group in groups
-                if abs(price - float(group[0]["price"])) <= tolerance + tick_size * 1e-9
+                index
+                for candidate_tick in range(tick - int(tolerance_ticks) - 1, tick + int(tolerance_ticks) + 2)
+                for index in group_by_tick.get(candidate_tick, [])
+                if abs(price - float(groups[index][0]["price"])) <= tolerance + tick_size * 1e-9
             ),
             None,
         )
+        matching_group = groups[matching_index] if matching_index is not None else None
         if matching_group is None:
             groups.append([event])
+            group_by_tick.setdefault(tick, []).append(len(groups) - 1)
         else:
             matching_group.append(event)
     return groups
@@ -121,6 +127,38 @@ def _reclaim_rule(rule: str, close: float, level: float, bullish: bool) -> bool:
     return close > level if bullish else close < level
 
 
+def _build_threshold_tree(values: list[float], *, bullish: bool) -> tuple[list[float], int]:
+    tree_size = 1
+    while tree_size < len(values):
+        tree_size *= 2
+    identity = inf if bullish else -inf
+    tree = [identity] * (2 * tree_size)
+    for index, value in enumerate(values):
+        tree[tree_size + index] = value
+    for index in range(tree_size - 1, 0, -1):
+        tree[index] = min(tree[index * 2], tree[index * 2 + 1]) if bullish else max(tree[index * 2], tree[index * 2 + 1])
+
+    return tree, tree_size
+
+
+def _first_threshold_index(
+    tree: list[float], tree_size: int, value_count: int, start: int, threshold: float, *, bullish: bool
+) -> int | None:
+    if start >= value_count:
+        return None
+
+    def find(node: int, left: int, right: int) -> int | None:
+        if right <= start or (tree[node] > threshold if bullish else tree[node] < threshold):
+            return None
+        if right - left == 1:
+            return left if left < value_count else None
+        middle = (left + right) // 2
+        result = find(node * 2, left, middle)
+        return result if result is not None else find(node * 2 + 1, middle, right)
+
+    return find(1, 0, tree_size)
+
+
 def detect_liquidity_sweeps(
     frame: pd.DataFrame,
     pools: Iterable[dict[str, object]],
@@ -138,59 +176,57 @@ def detect_liquidity_sweeps(
     prepared = _prepare_frame(frame)
     sweeps: list[dict[str, object]] = []
     ordered_pools = sorted(pools, key=lambda event: pd.Timestamp(event["confirmation_timestamp"]))
+    timestamp_values = prepared["timestamp"].tolist()
+    low_values = prepared["low"].astype(float).tolist()
+    high_values = prepared["high"].astype(float).tolist()
+    close_values = prepared["close"].astype(float).tolist()
     for bullish in (True, False):
         pending = [
             pool
             for pool in ordered_pools
             if str(pool["liquidity_type"]).endswith("low" if bullish else "high")
         ]
-        active: dict[int, dict[str, object]] = {}
-        active_keys: list[int] = []
-        next_pool = 0
-        for index, row in prepared.iterrows():
-            timestamp = pd.Timestamp(row["timestamp"])
-            while next_pool < len(pending) and pd.Timestamp(pending[next_pool]["confirmation_timestamp"]) < timestamp:
-                pool = pending[next_pool]
-                level_key = round(float(pool["level_price"]) / tick_size)
-                if level_key not in active:
-                    active[level_key] = pool
-                    insort(active_keys, level_key)
-                next_pool += 1
-
-            threshold_key = round((float(row["low" if bullish else "high"]) + (sweep_penetration_ticks * tick_size if bullish else -sweep_penetration_ticks * tick_size)) / tick_size)
-            candidate_start = bisect_left(active_keys, threshold_key)
-            candidate_keys = active_keys[candidate_start:] if bullish else active_keys[:candidate_start + 1]
-            for level_key in candidate_keys.copy():
-                pool = active[level_key]
-                level = float(pool["level_price"])
-                penetration = float(row["low" if bullish else "high"])
-                penetrated = penetration <= level - sweep_penetration_ticks * tick_size if bullish else penetration >= level + sweep_penetration_ticks * tick_size
-                if not penetrated:
-                    continue
-                reclaim_stop = min(len(prepared), index + sweep_k_bars + 1)
-                reclaim_index = next(
-                    (reclaim for reclaim in range(index + 1, reclaim_stop) if _reclaim_rule(reclaim_rule, float(prepared.iloc[reclaim]["close"]), level, bullish)),
-                    None,
-                )
-                if reclaim_index is None:
-                    active_keys.remove(level_key)
-                    del active[level_key]
-                    continue
-                reclaim_timestamp = pd.Timestamp(prepared.iloc[reclaim_index]["timestamp"])
-                sweeps.append(
-                    {
-                        "timestamp": reclaim_timestamp,
-                        "timeframe": timeframe,
-                        "liquidity_type": "sweep_bullish" if bullish else "sweep_bearish",
-                        "level_price": level,
-                        "source_event": pool["source_event"],
-                        "causal": True,
-                        "confirmation_timestamp": reclaim_timestamp,
-                        "event_type": "liquidity_sweep_bullish" if bullish else "liquidity_sweep_bearish",
-                    }
-                )
-                active_keys.remove(level_key)
-                del active[level_key]
+        threshold_values = low_values if bullish else high_values
+        threshold_tree, tree_size = _build_threshold_tree(threshold_values, bullish=bullish)
+        level_keys: set[int] = set()
+        for pool in pending:
+            level = float(pool["level_price"])
+            level_key = round(level / tick_size)
+            if level_key in level_keys:
+                continue
+            level_keys.add(level_key)
+            confirmation_index = bisect_left(timestamp_values, pd.Timestamp(pool["confirmation_timestamp"])) + 1
+            threshold = level - sweep_penetration_ticks * tick_size if bullish else level + sweep_penetration_ticks * tick_size
+            penetration_index = _first_threshold_index(
+                threshold_tree,
+                tree_size,
+                len(threshold_values),
+                confirmation_index,
+                threshold,
+                bullish=bullish,
+            )
+            if penetration_index is None:
+                continue
+            reclaim_stop = min(len(prepared), penetration_index + sweep_k_bars + 1)
+            reclaim_index = next(
+                (reclaim for reclaim in range(penetration_index + 1, reclaim_stop) if _reclaim_rule(reclaim_rule, close_values[reclaim], level, bullish)),
+                None,
+            )
+            if reclaim_index is None:
+                continue
+            reclaim_timestamp = pd.Timestamp(timestamp_values[reclaim_index])
+            sweeps.append(
+                {
+                    "timestamp": reclaim_timestamp,
+                    "timeframe": timeframe,
+                    "liquidity_type": "sweep_bullish" if bullish else "sweep_bearish",
+                    "level_price": level,
+                    "source_event": pool["source_event"],
+                    "causal": True,
+                    "confirmation_timestamp": reclaim_timestamp,
+                    "event_type": "liquidity_sweep_bullish" if bullish else "liquidity_sweep_bearish",
+                }
+            )
     return sorted(sweeps, key=lambda event: (event["confirmation_timestamp"], event["event_type"]))
 
 
